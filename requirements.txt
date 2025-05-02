@@ -1,0 +1,13 @@
+livekit>=1.0.3
+livekit-agents==1.0.11
+livekit-plugins-openai==1.0.11
+livekit-plugins-deepgram==1.0.11
+livekit-plugins-silero==1.0.11
+livekit-plugins-google
+livekit-plugins-assemblyai
+livekit-agents[turn-detector]~=1.0
+python-dotenv~=1.0
+mcp
+assemblyai
+fastapi
+uvicorn[standard]
