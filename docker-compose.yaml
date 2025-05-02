@@ -1,0 +1,44 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # don't publish ports—Traefik will handle routing
+    env_file:
+      - .env.local
+    ports:
+      - "8000:8000"
+    # run your FastAPI server
+    command: >
+      uvicorn server:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+    networks:
+      - traefik_public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lk-api.rule=Host(`lk-api.techrise.ai`)"
+      - "traefik.http.routers.lk-api.entrypoints=websecure"
+      - "traefik.http.routers.lk-api.tls=true"
+      - "traefik.http.routers.lk-api.tls.certresolver=leresolver"
+      - "traefik.http.services.lk-api.loadbalancer.server.port=8000"
+    # pass your LiveKit creds into the container
+    environment:
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - traefik_public
+    env_file:
+      - .env.local
+    # run your background agent
+    command: python agent_worker.py
+
+networks:
+  traefik_public:
+    external: true
