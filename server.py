@@ -74,6 +74,9 @@ async def dispatch_agent(
     config: AgentConfig = Body(...),
     credentials: HTTPBearer = Depends(security)
 ):
+    return await _dispatch_agent(config)
+
+async def _dispatch_agent(config: AgentConfig):
     lkapi = api.LiveKitAPI()
     
     try:
@@ -129,6 +132,23 @@ async def get_token(body: TokenRequest):
             at.metadata = body.metadata
         
         jwt = at.to_jwt()
+        config = AgentConfig(
+            agent_name=body.participantName,
+            room_name=body.roomName,
+            stt_engine="deepgram",
+            stt_model="nova-3",
+            stt_language="multi",
+            llm_engine="openai",
+            llm_model="gpt-4o-mini",
+            tts_engine="cartesia",
+            tts_language="pt",
+            tts_voice="2ccd63be-1c60-4b19-99f6-fa7465af0738",
+            user_language="pt-BR",
+            business_context="general",
+            prompt="You are a helpful voice AI assistant.",
+            metadata=body.metadata
+        )
+        await dispatch_agent(config)
         return TokenResponse(token=jwt)
     except Exception as e:
         raise HTTPException(500, f"Failed to create token: {e!s}")
