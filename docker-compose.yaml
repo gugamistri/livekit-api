@@ -22,7 +22,7 @@ services:
       - "traefik.http.routers.lk-api.entrypoints=websecure"
       - "traefik.http.routers.lk-api.tls=true"
       - "traefik.http.routers.lk-api.tls.certresolver=leresolver"
-      - "traefik.http.services.lk-api.loadbalancer.server.port=8000"x
+      - "traefik.http.services.lk-api.loadbalancer.server.port=8000"
 
   worker:
     build:

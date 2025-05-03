@@ -133,7 +133,7 @@ async def get_token(body: TokenRequest):
         
         jwt = at.to_jwt()
         config = AgentConfig(
-            agent_name=body.participantName,
+            agent_name="test-agent",
             room_name=body.roomName,
             stt_engine="deepgram",
             stt_model="nova-3",
