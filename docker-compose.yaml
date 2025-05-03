@@ -22,11 +22,7 @@ services:
       - "traefik.http.routers.lk-api.entrypoints=websecure"
       - "traefik.http.routers.lk-api.tls=true"
       - "traefik.http.routers.lk-api.tls.certresolver=leresolver"
-      - "traefik.http.services.lk-api.loadbalancer.server.port=8000"
-    # pass your LiveKit creds into the container
-    environment:
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - "traefik.http.services.lk-api.loadbalancer.server.port=8000"x
 
   worker:
     build:
