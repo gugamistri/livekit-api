@@ -37,7 +37,10 @@ services:
     env_file:
       - .env.local
     # run your background agent
-    command: python agent_worker.py
+    command:
+      - sh
+      - -c
+      - python agent_worker.py download-files && python agent_worker.py start    
 
 networks:
   traefik_public:
