@@ -1,30 +1,42 @@
-from datetime import timedelta
-from fastapi import FastAPI, Depends, HTTPException, Body
-from fastapi.security import HTTPBearer
-import uvicorn
-import os
-from typing import Optional, List, Dict, Any
-from dotenv import load_dotenv
-from livekit import api
-from pydantic import BaseModel, Field
-from fastapi.middleware.cors import CORSMiddleware
+# server.py
 
-load_dotenv('.env.local')
+import os
+import re
+import json
+import logging
+from datetime import timedelta
+from typing import Optional, List, Dict, Any
+
+from fastapi import FastAPI, Depends, HTTPException, Body, status
+from fastapi.security import HTTPBearer
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+import uvicorn
+from livekit import api
+
+# -----------------------------------------------------------------------------
+# 1) Load environment
+# -----------------------------------------------------------------------------
+load_dotenv(".env.local")
+
+# -----------------------------------------------------------------------------
+# 2) App & CORS
+# -----------------------------------------------------------------------------
 app = FastAPI()
 security = HTTPBearer()
-# List of allowed origins (use ["*"] to allow all, but avoid in production)
-allowed_origins = [
-    "*", 
-]
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,  # List of allowed origins
-    allow_credentials=True,         # Allow cookies
-    allow_methods=["*"],            # Allow all methods (GET, POST, etc.)
-    allow_headers=["*"],            # Allow all headers
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+# -----------------------------------------------------------------------------
+# 3) Data Models
+# -----------------------------------------------------------------------------
 class AgentConfig(BaseModel):
     stt_engine: str = "deepgram"
     stt_model: str = "nova-3"
@@ -33,7 +45,7 @@ class AgentConfig(BaseModel):
     llm_model: str = "gpt-4o-mini"
     tts_engine: str = "cartesia"
     tts_language: str = "pt"
-    tts_voice: str ="2ccd63be-1c60-4b19-99f6-fa7465af0738"
+    tts_voice: str = "2ccd63be-1c60-4b19-99f6-fa7465af0738"
     user_language: str = "pt-BR"
     business_context: str = "general"
     prompt: str = "You are a helpful voice AI assistant."
@@ -57,37 +69,40 @@ class Permissions(BaseModel):
     hidden:          Optional[bool]      = None
     agent:           Optional[bool]      = None
 
+
 class TokenRequest(BaseModel):
-    roomName:        str                   = Field(..., description="room to join")
-    participantName: str                   = Field(..., description="your identity")
-    ttl:             Optional[int]         = Field(600, description="ttl of the token, until expiry")
-    metadata:        Optional[Dict[str,Any]] = None
-    permissions:     Permissions           = Field(default_factory=Permissions)
+    roomName:        str                    = Field(..., description="room to join")
+    participantName: str                    = Field(..., description="your identity")
+    ttl:             Optional[int]          = Field(600, description="token TTL in seconds")
+    metadata:        Optional[Dict[str, Any]] = None
+    permissions:     Permissions            = Field(default_factory=Permissions)
+    phoneNumber:     Optional[str]          = Field(None, description="Phone number to dial")
 
 
 class TokenResponse(BaseModel):
-    token: str
+    token:       str
+    sipCallSid:  Optional[str] = None
 
 
+# -----------------------------------------------------------------------------
+# 4) Helper: dispatch an agent
+# -----------------------------------------------------------------------------
 @app.post("/dispatch-agent")
 async def dispatch_agent(
     config: AgentConfig = Body(...),
-    credentials: HTTPBearer = Depends(security)
+    credentials=Depends(security),
 ):
     return await _dispatch_agent(config)
 
+
 async def _dispatch_agent(config: AgentConfig):
     lkapi = api.LiveKitAPI()
-    
     try:
-        # Serialize config to JSON for metadata
-        metadata = config.model_dump_json()
-        print(metadata)
         dispatch = await lkapi.agent_dispatch.create_dispatch(
             api.CreateAgentDispatchRequest(
                 agent_name=config.agent_name,
                 room=config.room_name,
-                metadata=metadata
+                metadata=config.model_dump_json(),
             )
         )
         return {"dispatch_id": dispatch.id}
@@ -95,21 +110,26 @@ async def _dispatch_agent(config: AgentConfig):
         await lkapi.aclose()
 
 
+# -----------------------------------------------------------------------------
+# 5) Main: get-token endpoint
+# -----------------------------------------------------------------------------
 @app.post("/get-token", response_model=TokenResponse)
 async def get_token(body: TokenRequest):
     try:
         api_key = os.getenv("LIVEKIT_API_KEY")
         api_secret = os.getenv("LIVEKIT_API_SECRET")
         if not api_key or not api_secret:
-            raise HTTPException(500, "LIVEKIT_API_KEY / LIVEKIT_API_SECRET not set")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="LIVEKIT_API_KEY / LIVEKIT_API_SECRET not set"
+            )
 
         perms = body.permissions
 
-        at = api.AccessToken(
-            api_key=api_key,
-            api_secret=api_secret)\
-            .with_identity(body.participantName) \
-            .with_ttl( timedelta(seconds=body.ttl or 300)) \
+        # Build AccessToken with VideoGrants
+        at = api.AccessToken(api_key=api_key, api_secret=api_secret)\
+            .with_identity(body.participantName)\
+            .with_ttl(timedelta(seconds=body.ttl or 300))\
             .with_grants(api.VideoGrants(
                 room=body.roomName,
                 room_join=              perms.join               is not False,
@@ -117,41 +137,85 @@ async def get_token(body: TokenRequest):
                 room_list=              bool(perms.list),
                 room_admin=             bool(perms.admin),
                 room_record=            bool(perms.record),
-                recorder=               bool(perms.egress),       # deprecated flag
+                recorder=               bool(perms.egress),
                 ingress_admin=          bool(perms.ingress),
                 can_publish=            perms.publish             is not False,
                 can_subscribe=          perms.subscribe           is not False,
                 can_publish_data=       bool(perms.publish_data),
-                can_publish_sources=    perms.publish_sources  or [],
+                can_publish_sources=    perms.publish_sources   or [],
                 can_update_own_metadata=bool(perms.update_metadata),
                 hidden=                 bool(perms.hidden),
                 agent=                  bool(perms.agent),
             ))
-        
+
+        # Attach custom metadata if provided
         if body.metadata is not None:
             at.metadata = body.metadata
-        
-        jwt = at.to_jwt()
-        config = AgentConfig(
-            agent_name="test-agent",
-            room_name=body.roomName,
-            stt_engine="deepgram",
-            stt_model="nova-3",
-            stt_language="multi",
-            llm_engine="openai",
-            llm_model="gpt-4o-mini",
-            tts_engine="cartesia",
-            tts_language="pt",
-            tts_voice="2ccd63be-1c60-4b19-99f6-fa7465af0738",
-            user_language="pt-BR",
-            business_context="general",
-            prompt="You are a helpful voice AI assistant.",
-            metadata=body.metadata
-        )
-        await dispatch_agent(config)
-        return TokenResponse(token=jwt)
-    except Exception as e:
-        raise HTTPException(500, f"Failed to create token: {e!s}")
 
+        # Issue the JWT
+        jwt = at.to_jwt()
+        sip_call_sid: Optional[str] = None
+
+        # If phoneNumber is passed, validate & dial out
+        if body.phoneNumber:
+            # E.164 basic validation
+            if not re.fullmatch(r"^\d+$", body.phoneNumber):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="phoneNumber must be digits only"
+                )
+
+            # Re-use dispatch helper to spin up the AI agent
+            dispatch_meta = body.metadata or {}
+            await _dispatch_agent(
+                AgentConfig(
+                    agent_name="test-agent",
+                    room_name=body.roomName,
+                    business_context=json.dumps(dispatch_meta),
+                    prompt="(dispatch via get-token)",
+                )
+            )
+
+            # Now place the SIP call
+            lkapi = api.LiveKitAPI()
+            try:
+                trunk = os.getenv("SIP_OUTBOUND_TRUNK_ID")
+                if not trunk or not trunk.startswith("ST_"):
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="SIP_OUTBOUND_TRUNK_ID not configured"
+                    )
+
+                sip_part = await lkapi.sip.create_sip_participant(
+                    api.CreateSIPParticipantRequest(
+                        room_name=body.roomName,
+                        sip_trunk_id=trunk,
+                        sip_call_to=body.phoneNumber,
+                        participant_identity="phone_user"
+                    )
+                )
+                sip_call_sid = sip_part.call_sid
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to create SIP participant: {e!s}"
+                )
+            finally:
+                await lkapi.aclose()
+
+        return TokenResponse(token=jwt, sipCallSid=sip_call_sid)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create token: {e!s}"
+        )
+
+
+# -----------------------------------------------------------------------------
+# 6) Run Server
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
