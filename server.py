@@ -1,5 +1,3 @@
-# server.py
-
 import os
 import re
 import json
@@ -7,8 +5,8 @@ import logging
 from datetime import timedelta
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, Depends, HTTPException, Body, status
-from fastapi.security import HTTPBearer
+from fastapi import FastAPI, Depends, HTTPException, Body, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -58,8 +56,8 @@ class Permissions(BaseModel):
     create:          Optional[bool]      = None
     list:            Optional[bool]      = None
     admin:           Optional[bool]      = None
-    record:          Optional[bool]      = None   # maps to room_record
-    egress:          Optional[bool]      = None   # deprecated → recorder
+    record:          Optional[bool]      = None
+    egress:          Optional[bool]      = None
     ingress:         Optional[bool]      = None
     publish:         Optional[bool]      = None
     subscribe:       Optional[bool]      = None
@@ -85,12 +83,24 @@ class TokenResponse(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# 4) Helper: dispatch an agent
+# 4) Helper: validate bearer token
+# -----------------------------------------------------------------------------
+def validate_bearer_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    expected_token = os.getenv("API_TOKEN")
+    if not expected_token or credentials.credentials != expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing Bearer token"
+        )
+
+
+# -----------------------------------------------------------------------------
+# 5) Helper: dispatch an agent
 # -----------------------------------------------------------------------------
 @app.post("/dispatch-agent")
 async def dispatch_agent(
     config: AgentConfig = Body(...),
-    credentials=Depends(security),
+    _: HTTPAuthorizationCredentials = Depends(validate_bearer_token),
 ):
     return await _dispatch_agent(config)
 
@@ -109,12 +119,42 @@ async def _dispatch_agent(config: AgentConfig):
     finally:
         await lkapi.aclose()
 
+async def create_sip_participant(room_name: str, phone_number: str):
+    lkapi = api.LiveKitAPI()
+    try:
+        trunk = os.getenv("SIP_OUTBOUND_TRUNK_ID")
+        if not trunk or not trunk.startswith("ST_"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="SIP_OUTBOUND_TRUNK_ID not configured"
+            )
+
+        sip_part = await lkapi.sip.create_sip_participant(
+            api.CreateSIPParticipantRequest(
+                room_name=roomName,
+                sip_trunk_id=trunk,
+                sip_call_to=phoneNumber,
+                participant_identity="phone_user"
+            )
+        )
+        sip_call_sid = sip_part.call_sid
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create SIP participant: {e!s}"
+        )
+    finally:
+        await lkapi.aclose()
+    return sip_call_sid
 
 # -----------------------------------------------------------------------------
-# 5) Main: get-token endpoint
+# 6) Main: get-token endpoint
 # -----------------------------------------------------------------------------
 @app.post("/get-token", response_model=TokenResponse)
-async def get_token(body: TokenRequest):
+async def get_token(
+    body: TokenRequest,
+    _: HTTPAuthorizationCredentials = Depends(validate_bearer_token),
+):
     try:
         api_key = os.getenv("LIVEKIT_API_KEY")
         api_secret = os.getenv("LIVEKIT_API_SECRET")
@@ -123,7 +163,12 @@ async def get_token(body: TokenRequest):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="LIVEKIT_API_KEY / LIVEKIT_API_SECRET not set"
             )
-
+        if body.phoneNumber:
+            if not re.fullmatch(r"^\d+$", body.phoneNumber):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="phoneNumber must be digits only"
+                )
         perms = body.permissions
 
         # Build AccessToken with VideoGrants
@@ -148,60 +193,26 @@ async def get_token(body: TokenRequest):
                 agent=                  bool(perms.agent),
             ))
 
-        # Attach custom metadata if provided
         if body.metadata is not None:
             at.metadata = body.metadata
 
-        # Issue the JWT
         jwt = at.to_jwt()
         sip_call_sid: Optional[str] = None
 
-        # If phoneNumber is passed, validate & dial out
-        if body.phoneNumber:
-            # E.164 basic validation
-            if not re.fullmatch(r"^\d+$", body.phoneNumber):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="phoneNumber must be digits only"
-                )
 
-            # Re-use dispatch helper to spin up the AI agent
-            dispatch_meta = body.metadata or {}
-            await _dispatch_agent(
-                AgentConfig(
-                    agent_name="test-agent",
-                    room_name=body.roomName,
-                    business_context=json.dumps(dispatch_meta),
-                    prompt="(dispatch via get-token)",
-                )
+        dispatch_meta = body.metadata or {}
+
+        await _dispatch_agent(
+            AgentConfig(
+                agent_name="test-agent",
+                room_name=body.roomName,
+                business_context=json.dumps(dispatch_meta),
+                prompt="Você é um atendente virtual que atende clientes por telefone.",
             )
+        )
 
-            # Now place the SIP call
-            lkapi = api.LiveKitAPI()
-            try:
-                trunk = os.getenv("SIP_OUTBOUND_TRUNK_ID")
-                if not trunk or not trunk.startswith("ST_"):
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="SIP_OUTBOUND_TRUNK_ID not configured"
-                    )
-
-                sip_part = await lkapi.sip.create_sip_participant(
-                    api.CreateSIPParticipantRequest(
-                        room_name=body.roomName,
-                        sip_trunk_id=trunk,
-                        sip_call_to=body.phoneNumber,
-                        participant_identity="phone_user"
-                    )
-                )
-                sip_call_sid = sip_part.call_sid
-            except Exception as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to create SIP participant: {e!s}"
-                )
-            finally:
-                await lkapi.aclose()
+        if body.phoneNumber:
+            sip_call_sid = await create_sip_participant(body.roomName, body.phoneNumber)
 
         return TokenResponse(token=jwt, sipCallSid=sip_call_sid)
 
@@ -215,7 +226,7 @@ async def get_token(body: TokenRequest):
 
 
 # -----------------------------------------------------------------------------
-# 6) Run Server
+# 7) Run Server
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
