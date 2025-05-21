@@ -37,8 +37,8 @@ app.add_middleware(
 # -----------------------------------------------------------------------------
 class AgentConfig(BaseModel):
     stt_engine: str = "deepgram"
-    stt_model: str = "nova-3"
-    stt_language: str = "multi"
+    stt_model: str = "nova-2"
+    stt_language: str = "pt"
     llm_engine: str = "openai"
     llm_model: str = "gpt-4o-mini"
     tts_engine: str = "cartesia"
@@ -50,7 +50,7 @@ class AgentConfig(BaseModel):
     agent_name: str
     room_name: str
 
-
+ 
 class Permissions(BaseModel):
     join:            Optional[bool]      = None
     create:          Optional[bool]      = None
@@ -112,7 +112,7 @@ async def _dispatch_agent(config: AgentConfig):
             api.CreateAgentDispatchRequest(
                 agent_name=config.agent_name,
                 room=config.room_name,
-                metadata=config.model_dump_json(),
+                metadata=config.model_dump_json()
             )
         )
         return {"dispatch_id": dispatch.id}
@@ -131,10 +131,11 @@ async def create_sip_participant(room_name: str, phone_number: str):
 
         sip_part = await lkapi.sip.create_sip_participant(
             api.CreateSIPParticipantRequest(
-                room_name=roomName,
+                room_name=room_name,
                 sip_trunk_id=trunk,
-                sip_call_to=phoneNumber,
-                participant_identity="phone_user"
+                sip_call_to=phone_number,
+                participant_identity="phone_user",
+                wait_until_answered=True,
             )
         )
         sip_call_sid = sip_part.call_sid
@@ -193,21 +194,21 @@ async def get_token(
                 agent=                  bool(perms.agent),
             ))
 
-        if body.metadata is not None:
-            at.metadata = body.metadata
+        if body.agentData is not None:
+            at.metadata = body.agentData
 
         jwt = at.to_jwt()
         sip_call_sid: Optional[str] = None
 
 
-        dispatch_meta = body.metadata or {}
+        dispatch_meta = body.agentData or {}
 
         await _dispatch_agent(
             AgentConfig(
                 agent_name="test-agent",
                 room_name=body.roomName,
-                business_context=json.dumps(dispatch_meta),
-                prompt="Você é um atendente virtual que atende clientes por telefone.",
+                tts_voice= "5063f45b-d9e0-4095-b056-8f3ee055d411" if dispatch_meta.voiceModel == "male" else  "2ccd63be-1c60-4b19-99f6-fa7465af0738",
+                prompt= dispatch_meta.prompt or  "Você é um atendente virtual que atende clientes por telefone.",
             )
         )
 
