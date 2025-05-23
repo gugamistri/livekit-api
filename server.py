@@ -72,6 +72,7 @@ class TokenRequest(BaseModel):
     roomName:        str                    = Field(..., description="room to join")
     participantName: str                    = Field(..., description="your identity")
     ttl:             Optional[int]          = Field(600, description="token TTL in seconds")
+    voiceModel       Optional[str]          = Filed(None, description="Voice Model to use" 
     agentData:       Optional[Dict[str, Any]] = None
     permissions:     Permissions            = Field(default_factory=Permissions)
     phoneNumber:     Optional[str]          = Field(None, description="Phone number to dial")
@@ -207,7 +208,7 @@ async def get_token(
             AgentConfig(
                 agent_name="test-agent",
                 room_name=body.roomName,
-                tts_voice= "5063f45b-d9e0-4095-b056-8f3ee055d411" if  dispatch_meta.get("voiceModel", "female")=="male" else  "2ccd63be-1c60-4b19-99f6-fa7465af0738",
+                tts_voice= "5063f45b-d9e0-4095-b056-8f3ee055d411" if  body.voiceModel=="male" else  "2ccd63be-1c60-4b19-99f6-fa7465af0738",
                 prompt=  dispatch_meta.get("prompt", "Você é um atendente virtual que atende clientes por telefone."),
             )
         )
